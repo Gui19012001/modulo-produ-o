@@ -21,21 +21,13 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# =========================================================
-# CONEXÕES
-# =========================================================
-CONN_STR_PROTHEUS = (
+# ==================================================
+# CONEXÃO SQL SERVER (STRING)
+# ==================================================
+conn_str = (
     "DRIVER={SQL Server};"
     "SERVER=200.201.241.3;"
     "DATABASE=PROTHEUSLOBO;"
-    "UID=leitura;"
-    "PWD=54321;"
-)
-
-CONN_STR_ACESSOTA = (
-    "DRIVER={SQL Server};"
-    "SERVER=200.201.241.3;"
-    "DATABASE=ACESSOTA;"
     "UID=leitura;"
     "PWD=54321;"
 )
