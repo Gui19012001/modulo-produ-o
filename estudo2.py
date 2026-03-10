@@ -1,6 +1,7 @@
 import os
+import time
 import unicodedata
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from html import escape
 from typing import Optional
 
@@ -21,16 +22,70 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ==================================================
-# CONEXÃO SQL SERVER (STRING)
-# ==================================================
-conn_str = (
+# =========================================================
+# CONEXÕES — DRIVER ANTIGO {SQL Server}
+# =========================================================
+CONN_STR_PROTHEUS = (
     "DRIVER={SQL Server};"
     "SERVER=200.201.241.3;"
     "DATABASE=PROTHEUSLOBO;"
     "UID=leitura;"
     "PWD=54321;"
 )
+
+CONN_STR_ACESSOTA = (
+    "DRIVER={SQL Server};"
+    "SERVER=200.201.241.3;"
+    "DATABASE=ACESSOTA;"
+    "UID=leitura;"
+    "PWD=54321;"
+)
+
+
+def connect_sql_safe(conn_str: str, timeout: int = 10, retries: int = 3, delay: int = 2, msg: str = "SQL Server inacessível"):
+    last_err = None
+    for attempt in range(retries):
+        try:
+            return pyodbc.connect(conn_str, timeout=timeout, autocommit=True)
+        except pyodbc.Error as e:
+            last_err = e
+            st.warning(f"⚠️ {msg} (tentativa {attempt + 1}/{retries})")
+            time.sleep(delay)
+
+    st.error(f"❌ {msg}. Último erro: {last_err}")
+    return None
+
+
+def read_sql_safe(
+    query: str,
+    conn_str: str,
+    params=None,
+    retries: int = 3,
+    delay: int = 2,
+    msg: str = "Falha ao consultar SQL",
+):
+    last_err = None
+
+    for i in range(retries):
+        conn = connect_sql_safe(conn_str, timeout=10, retries=1, delay=1, msg=msg)
+        if conn is None:
+            return pd.DataFrame()
+
+        try:
+            return pd.read_sql_query(query, conn, params=params)
+        except (pd.errors.DatabaseError, pyodbc.Error) as e:
+            last_err = e
+            st.warning(f"⚠️ {msg} (tentativa {i + 1}/{retries})")
+            time.sleep(delay)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    st.error(f"❌ {msg}. Último erro: {last_err}")
+    return pd.DataFrame()
+
 
 # =========================================================
 # CAMINHOS ABS
@@ -53,7 +108,6 @@ META_GGM = 300_000.00
 META_GGM_FAT = 0.006
 META_FAT = 50_000_000.00
 
-# opcionais
 META_ABS = None
 META_HE_RS = None
 META_HE_HRS = None
@@ -198,7 +252,7 @@ def fmt_num0(v) -> str:
 def fmt_pct(v) -> str:
     if v is None or pd.isna(v):
         return "—"
-    return f"{float(v)*100:,.2f}%".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{float(v) * 100:,.2f}%".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def fmt_value(v, kind: str) -> str:
@@ -235,15 +289,6 @@ def month_last_day(m: str) -> date:
     return (pd.to_datetime(m + "-01") + pd.offsets.MonthEnd(1)).date()
 
 
-def is_all_zero_or_nan(s: pd.Series) -> bool:
-    if s is None or len(s) == 0:
-        return True
-    ss = pd.to_numeric(s, errors="coerce")
-    if ss.notna().sum() == 0:
-        return True
-    return float(ss.fillna(0).abs().sum()) == 0.0
-
-
 def normalizar_nome_coluna(col):
     col = str(col).strip()
     col = unicodedata.normalize("NFKD", col).encode("ascii", "ignore").decode("utf-8")
@@ -264,7 +309,7 @@ def encontrar_coluna(df: pd.DataFrame, candidatos: list[str]) -> str:
 def ajustar_data(dt):
     if pd.isna(dt):
         return None
-    if dt.time() <= time(5, 0):
+    if dt.time() <= dt_time(5, 0):
         return dt.date() - timedelta(days=1)
     return dt.date()
 
@@ -328,7 +373,7 @@ def pct_meta_text(value_now, meta, kind):
     if meta is None or safe_float(meta) <= 0 or value_now is None or pd.isna(value_now):
         return "Sem meta"
     pct = safe_float(value_now) / safe_float(meta)
-    return f"{pct*100:,.2f}% da meta".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{pct * 100:,.2f}% da meta".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 # =========================================================
@@ -461,11 +506,7 @@ def q_sd1_sum_by_month(data_ini_yyyymmdd: str, data_fim_yyyymmdd: str, contas: l
     """
     params = [data_ini_yyyymmdd, data_fim_yyyymmdd] + list(contas) + list(ccs)
 
-    cn = pyodbc.connect(CONN_STR_PROTHEUS)
-    try:
-        df = pd.read_sql_query(sql, cn, params=tuple(params))
-    finally:
-        cn.close()
+    df = read_sql_safe(sql, CONN_STR_PROTHEUS, params=tuple(params), msg="Falha ao consultar SD1010")
 
     if df.empty:
         return pd.DataFrame(columns=["MES_REF", "VALOR"])
@@ -539,11 +580,7 @@ def q_sd3_ggf_sum_by_month(data_ini_yyyymmdd: str, data_fim_yyyymmdd: str, cods:
         + list(ccs)
     )
 
-    cn = pyodbc.connect(CONN_STR_PROTHEUS)
-    try:
-        df = pd.read_sql_query(sql, cn, params=tuple(params))
-    finally:
-        cn.close()
+    df = read_sql_safe(sql, CONN_STR_PROTHEUS, params=tuple(params), msg="Falha ao consultar SD3010")
 
     if df.empty:
         return pd.DataFrame(columns=["MES_REF", "VALOR"])
@@ -572,11 +609,7 @@ def q_faturamento_sum_by_month(data_ini_yyyymmdd: str, data_fim_yyyymmdd: str, f
     """
     params = [filial, data_ini_yyyymmdd, data_fim_yyyymmdd] + list(CF_SUBLIST)
 
-    cn = pyodbc.connect(CONN_STR_PROTHEUS)
-    try:
-        df = pd.read_sql_query(sql, cn, params=tuple(params))
-    finally:
-        cn.close()
+    df = read_sql_safe(sql, CONN_STR_PROTHEUS, params=tuple(params), msg="Falha ao consultar SD2010")
 
     if df.empty:
         return pd.DataFrame(columns=["MES_REF", "VALMERC"])
@@ -612,12 +645,7 @@ def q_he_horas_sum_by_month(data_ini_yyyymmdd: str, data_fim_yyyymmdd: str, verb
     """
 
     params = [data_ini_yyyymmdd, data_fim_yyyymmdd] + verbas_3
-
-    cn = pyodbc.connect(CONN_STR_PROTHEUS)
-    try:
-        df = pd.read_sql_query(sql, cn, params=tuple(params))
-    finally:
-        cn.close()
+    df = read_sql_safe(sql, CONN_STR_PROTHEUS, params=tuple(params), msg="Falha ao consultar hora extra (horas)")
 
     if df.empty:
         return pd.DataFrame(columns=["MES_REF", "HE_HORAS"])
@@ -629,15 +657,13 @@ def q_he_horas_sum_by_month(data_ini_yyyymmdd: str, data_fim_yyyymmdd: str, verb
 
 @st.cache_data(ttl=14400)
 def descobrir_coluna_valor_he():
-    candidatos = ["PC_VALOR", "PC_VALCAL", "PC_VAL", "PC_VALCALC", "PC_VLR"]
-    cn = pyodbc.connect(CONN_STR_PROTHEUS)
-    try:
-        sql = "SELECT name FROM sys.columns WHERE object_id = OBJECT_ID('dbo.SPC010')"
-        cols = pd.read_sql_query(sql, cn)["name"].astype(str).str.upper().tolist()
-    finally:
-        cn.close()
+    sql = "SELECT name FROM sys.columns WHERE object_id = OBJECT_ID('dbo.SPC010')"
+    df = read_sql_safe(sql, CONN_STR_PROTHEUS, msg="Falha ao descobrir coluna de valor da HE")
+    if df.empty or "name" not in df.columns:
+        return None
 
-    for cand in candidatos:
+    cols = df["name"].astype(str).str.upper().tolist()
+    for cand in ["PC_VALOR", "PC_VALCAL", "PC_VAL", "PC_VALCALC", "PC_VLR"]:
         if cand.upper() in cols:
             return cand
     return None
@@ -673,12 +699,7 @@ def q_he_rs_sum_by_month(data_ini_yyyymmdd: str, data_fim_yyyymmdd: str, verbas:
     """
 
     params = [data_ini_yyyymmdd, data_fim_yyyymmdd] + verbas_3
-
-    cn = pyodbc.connect(CONN_STR_PROTHEUS)
-    try:
-        df = pd.read_sql_query(sql, cn, params=tuple(params))
-    finally:
-        cn.close()
+    df = read_sql_safe(sql, CONN_STR_PROTHEUS, params=tuple(params), msg="Falha ao consultar hora extra (R$)")
 
     if df.empty:
         return pd.DataFrame(columns=["MES_REF", "HE_RS"])
@@ -738,8 +759,8 @@ def q_abs_marcacoes(data_ini_str: str, data_fim_str: str):
     data_ini = pd.to_datetime(data_ini_str).date()
     data_fim = pd.to_datetime(data_fim_str).date()
 
-    dt_inicio = datetime.combine(data_ini, time(0, 0)) - timedelta(hours=5)
-    dt_fim = datetime.combine(data_fim + timedelta(days=1), time(5, 0))
+    dt_inicio = datetime.combine(data_ini, dt_time(0, 0)) - timedelta(hours=5)
+    dt_fim = datetime.combine(data_fim + timedelta(days=1), dt_time(5, 0))
 
     sql = """
     SELECT
@@ -754,11 +775,7 @@ def q_abs_marcacoes(data_ini_str: str, data_fim_str: str):
         AND M.MAR_DATAHORA < ?
     """
 
-    cn = pyodbc.connect(CONN_STR_ACESSOTA)
-    try:
-        df = pd.read_sql_query(sql, cn, params=(dt_inicio, dt_fim))
-    finally:
-        cn.close()
+    df = read_sql_safe(sql, CONN_STR_ACESSOTA, params=(dt_inicio, dt_fim), msg="Falha ao consultar marcações")
 
     if df.empty:
         return pd.DataFrame(columns=["DATA", "MATRICULA", "QTD_MARCACOES"])
@@ -780,8 +797,8 @@ def q_abs_ponto(data_ini_str: str, data_fim_str: str):
     data_ini = pd.to_datetime(data_ini_str).date()
     data_fim = pd.to_datetime(data_fim_str).date()
 
-    dt_inicio = datetime.combine(data_ini, time(0, 0)) - timedelta(hours=5)
-    dt_fim = datetime.combine(data_fim + timedelta(days=1), time(5, 0))
+    dt_inicio = datetime.combine(data_ini, dt_time(0, 0)) - timedelta(hours=5)
+    dt_fim = datetime.combine(data_fim + timedelta(days=1), dt_time(5, 0))
 
     sql = """
     SELECT
@@ -797,11 +814,7 @@ def q_abs_ponto(data_ini_str: str, data_fim_str: str):
         AND PT.PON_DATAHORA < ?
     """
 
-    cn = pyodbc.connect(CONN_STR_ACESSOTA)
-    try:
-        df = pd.read_sql_query(sql, cn, params=(dt_inicio, dt_fim))
-    finally:
-        cn.close()
+    df = read_sql_safe(sql, CONN_STR_ACESSOTA, params=(dt_inicio, dt_fim), msg="Falha ao consultar ponto/ausência")
 
     if df.empty:
         return pd.DataFrame(columns=["DATA", "MATRICULA", "QTD_AUSENCIA"])
@@ -1051,7 +1064,7 @@ def card_html(
     note: Optional[str] = None,
     has_data: bool = True,
 ):
-    del reverse_good  # mantido para compatibilidade da assinatura
+    del reverse_good
 
     value_txt = fmt_value(value_now, kind) if has_data else "Sem base"
     prev_txt = fmt_value(value_prev, kind) if has_data else "Sem base"
@@ -1090,166 +1103,27 @@ def render_dashboard_html(base: pd.DataFrame):
     has_ggf_item = bool(base["GGF_ITEM"].notna().sum())
 
     cards = []
-    cards.append(card_html(
-        title="FATURAMENTO",
-        value_now=m2["VALMERC"],
-        value_prev=m1["VALMERC"],
-        series_df=base,
-        ycol="VALMERC",
-        color=COLORS["fat"],
-        icon_svg=svg_icon_receipt(),
-        kind="brl",
-        meta=META_FAT,
-        area_class="area-fat",
-    ))
-    cards.append(card_html(
-        title="FACILITIES",
-        value_now=m2["FAC_TOTAL"],
-        value_prev=m1["FAC_TOTAL"],
-        series_df=base,
-        ycol="FAC_TOTAL",
-        color=COLORS["fac"],
-        icon_svg=svg_icon_building(),
-        kind="brl",
-        meta=META_FAC_TOTAL,
-        area_class="area-fac",
-    ))
-    cards.append(card_html(
-        title="HORA EXTRA (R$)",
-        value_now=m2["HE_RS"],
-        value_prev=m1["HE_RS"],
-        series_df=base,
-        ycol="HE_RS",
-        color=COLORS["he"],
-        icon_svg=svg_icon_clock(),
-        kind="brl",
-        meta=META_HE_RS,
-        area_class="area-he-rs",
-    ))
-    cards.append(card_html(
-        title="ABSENTEÍSMO",
-        value_now=m2["ABS_PCT"],
-        value_prev=m1["ABS_PCT"],
-        series_df=base,
-        ycol="ABS_PCT",
-        color=COLORS["abs"],
-        icon_svg=svg_icon_abs(),
-        kind="pct",
-        meta=META_ABS,
-        area_class="area-abs",
-    ))
-    cards.append(card_html(
-        title="GGF",
-        value_now=m2["GGF"],
-        value_prev=m1["GGF"],
-        series_df=base,
-        ycol="GGF",
-        color=COLORS["ggf"],
-        icon_svg=svg_icon_box(),
-        kind="brl",
-        meta=META_GGF,
-        area_class="area-ggf",
-    ))
-    cards.append(card_html(
-        title="GGM",
-        value_now=m2["GGM"],
-        value_prev=m1["GGM"],
-        series_df=base,
-        ycol="GGM",
-        color=COLORS["ggm"],
-        icon_svg=svg_icon_tools(),
-        kind="brl",
-        meta=META_GGM,
-        area_class="area-ggm",
-    ))
-    cards.append(card_html(
-        title="ENERGIA",
-        value_now=m2["FAC_ENERGIA"],
-        value_prev=m1["FAC_ENERGIA"],
-        series_df=base,
-        ycol="FAC_ENERGIA",
-        color=COLORS["facd"],
-        icon_svg=svg_icon_energy(),
-        kind="brl",
-        meta=META_ENERGIA,
-        area_class="area-energia",
-    ))
-    cards.append(card_html(
-        title="HORA EXTRA (HRS)",
-        value_now=m2["HE_HORAS"],
-        value_prev=m1["HE_HORAS"],
-        series_df=base,
-        ycol="HE_HORAS",
-        color=COLORS["he"],
-        icon_svg=svg_icon_clock(),
-        kind="num",
-        meta=META_HE_HRS,
-        area_class="area-he-hrs",
-    ))
-    cards.append(card_html(
-        title="GGF/ITENS PROD",
-        value_now=m2["GGF_ITEM"],
-        value_prev=m1["GGF_ITEM"],
-        series_df=base,
-        ycol="GGF_ITEM",
-        color=COLORS["ggf"],
-        icon_svg=svg_icon_box(),
-        kind="brl",
-        meta=META_GGF_ITEM,
-        area_class="area-ggf-item",
-        note=None if has_ggf_item else "Sem base de itens produzidos configurada neste script.",
-        has_data=has_ggf_item,
-    ))
-    cards.append(card_html(
-        title="GGM/FAT",
-        value_now=m2["GGM_PCT"],
-        value_prev=m1["GGM_PCT"],
-        series_df=base,
-        ycol="GGM_PCT",
-        color=COLORS["ggm"],
-        icon_svg=svg_icon_tools(),
-        kind="pct",
-        meta=META_GGM_FAT,
-        area_class="area-ggm-fat",
-    ))
-    cards.append(card_html(
-        title="ÁGUA",
-        value_now=m2["FAC_AGUA"],
-        value_prev=m1["FAC_AGUA"],
-        series_df=base,
-        ycol="FAC_AGUA",
-        color=COLORS["facd"],
-        icon_svg=svg_icon_water(),
-        kind="brl",
-        meta=META_AGUA,
-        area_class="area-agua",
-    ))
-    cards.append(card_html(
-        title="PESSOAS (HE)",
-        value_now=m2["PESSOAS_HE"],
-        value_prev=m1["PESSOAS_HE"],
-        series_df=base,
-        ycol="PESSOAS_HE",
-        color=COLORS["pessoas"],
-        icon_svg=svg_icon_people(),
-        kind="num",
-        meta=META_PESSOAS_HE,
-        area_class="area-pessoas",
-    ))
+    cards.append(card_html("FATURAMENTO", m2["VALMERC"], m1["VALMERC"], base, "VALMERC", COLORS["fat"], svg_icon_receipt(), "area-fat", "brl", META_FAT))
+    cards.append(card_html("FACILITIES", m2["FAC_TOTAL"], m1["FAC_TOTAL"], base, "FAC_TOTAL", COLORS["fac"], svg_icon_building(), "area-fac", "brl", META_FAC_TOTAL))
+    cards.append(card_html("HORA EXTRA (R$)", m2["HE_RS"], m1["HE_RS"], base, "HE_RS", COLORS["he"], svg_icon_clock(), "area-he-rs", "brl", META_HE_RS))
+    cards.append(card_html("ABSENTEÍSMO", m2["ABS_PCT"], m1["ABS_PCT"], base, "ABS_PCT", COLORS["abs"], svg_icon_abs(), "area-abs", "pct", META_ABS))
+    cards.append(card_html("GGF", m2["GGF"], m1["GGF"], base, "GGF", COLORS["ggf"], svg_icon_box(), "area-ggf", "brl", META_GGF))
+    cards.append(card_html("GGM", m2["GGM"], m1["GGM"], base, "GGM", COLORS["ggm"], svg_icon_tools(), "area-ggm", "brl", META_GGM))
+    cards.append(card_html("ENERGIA", m2["FAC_ENERGIA"], m1["FAC_ENERGIA"], base, "FAC_ENERGIA", COLORS["facd"], svg_icon_energy(), "area-energia", "brl", META_ENERGIA))
+    cards.append(card_html("HORA EXTRA (HRS)", m2["HE_HORAS"], m1["HE_HORAS"], base, "HE_HORAS", COLORS["he"], svg_icon_clock(), "area-he-hrs", "num", META_HE_HRS))
+    cards.append(card_html("GGF/ITENS PROD", m2["GGF_ITEM"], m1["GGF_ITEM"], base, "GGF_ITEM", COLORS["ggf"], svg_icon_box(), "area-ggf-item", "brl", META_GGF_ITEM, note=None if has_ggf_item else "Sem base de itens produzidos configurada neste script.", has_data=has_ggf_item))
+    cards.append(card_html("GGM/FAT", m2["GGM_PCT"], m1["GGM_PCT"], base, "GGM_PCT", COLORS["ggm"], svg_icon_tools(), "area-ggm-fat", "pct", META_GGM_FAT))
+    cards.append(card_html("ÁGUA", m2["FAC_AGUA"], m1["FAC_AGUA"], base, "FAC_AGUA", COLORS["facd"], svg_icon_water(), "area-agua", "brl", META_AGUA))
+    cards.append(card_html("PESSOAS (HE)", m2["PESSOAS_HE"], m1["PESSOAS_HE"], base, "PESSOAS_HE", COLORS["pessoas"], svg_icon_people(), "area-pessoas", "num", META_PESSOAS_HE))
 
-    html = f"""
+    return f"""
     <!DOCTYPE html>
     <html>
     <head>
       <meta charset="utf-8" />
       <style>
         * {{ box-sizing: border-box; }}
-        body {{
-          margin: 0;
-          font-family: Inter, Segoe UI, Arial, sans-serif;
-          background: transparent;
-        }}
-
+        body {{ margin: 0; font-family: Inter, Segoe UI, Arial, sans-serif; background: transparent; }}
         .dashboard {{
           display: grid;
           grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -1260,7 +1134,6 @@ def render_dashboard_html(base: pd.DataFrame):
           gap: 12px;
           padding: 2px 2px 4px 2px;
         }}
-
         .area-fat {{ grid-area: fat; }}
         .area-fac {{ grid-area: fac; }}
         .area-he-rs {{ grid-area: he; }}
@@ -1273,132 +1146,28 @@ def render_dashboard_html(base: pd.DataFrame):
         .area-ggm-fat {{ grid-area: ggmfat; }}
         .area-agua {{ grid-area: agua; }}
         .area-pessoas {{ grid-area: pessoas; }}
-
-        .kpi-card {{
-          position: relative;
-          height: 198px;
-          padding: 10px 12px 8px 12px;
-          border-radius: 16px;
-          background: rgba(255,255,255,.84);
-          border: 1px solid rgba(17,24,39,.10);
-          box-shadow: 0 10px 26px rgba(15,23,42,.08);
-          overflow: hidden;
-        }}
-
-        .card-topline {{
-          position: absolute;
-          top: 0;
-          left: 0;
-          right: 0;
-          height: 3px;
-        }}
-
-        .card-head {{
-          display: flex;
-          align-items: flex-start;
-          justify-content: space-between;
-          gap: 8px;
-          margin-top: 1px;
-        }}
-
-        .card-title {{
-          font-size: 12px;
-          font-weight: 900;
-          letter-spacing: .35px;
-          color: #1f2937;
-          text-transform: uppercase;
-        }}
-
-        .card-icon {{
-          width: 32px;
-          height: 32px;
-          flex: 0 0 32px;
-          opacity: .95;
-        }}
-
-        .card-icon svg {{
-          width: 100%;
-          height: 100%;
-        }}
-
-        .card-value {{
-          font-size: 29px;
-          line-height: 1.05;
-          font-weight: 950;
-          color: #111827;
-          margin: 2px 0 6px 0;
-          letter-spacing: -.3px;
-        }}
-
-        .card-meta-row {{
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 8px;
-          margin-bottom: 6px;
-        }}
-
-        .pill {{
-          display: inline-flex;
-          align-items: center;
-          border-radius: 999px;
-          padding: 4px 8px;
-          font-size: 10px;
-          font-weight: 900;
-          border: 1px solid transparent;
-          white-space: nowrap;
-        }}
-
-        .pill-gray {{
-          background: rgba(17,24,39,.06);
-          color: #6b7280;
-          border-color: rgba(17,24,39,.04);
-          margin-bottom: 6px;
-        }}
-
-        .meta-label {{
-          font-size: 10px;
-          font-weight: 800;
-          color: #7c8698;
-          text-align: right;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          max-width: 44%;
-        }}
-
-        .card-note {{
-          font-size: 10px;
-          color: #8a93a6;
-          margin-top: -2px;
-          margin-bottom: 4px;
-        }}
-
-        .plot-wrap {{
-          width: 100%;
-          height: 82px;
-        }}
-
-        .plot-wrap .plotly-graph-div {{
-          width: 100% !important;
-          height: 82px !important;
-        }}
-
-        @media (max-width: 1450px) {{
-          .card-value {{ font-size: 25px; }}
-          .dashboard {{ gap: 10px; }}
-        }}
+        .kpi-card {{ position: relative; height: 198px; padding: 10px 12px 8px 12px; border-radius: 16px; background: rgba(255,255,255,.84); border: 1px solid rgba(17,24,39,.10); box-shadow: 0 10px 26px rgba(15,23,42,.08); overflow: hidden; }}
+        .card-topline {{ position: absolute; top: 0; left: 0; right: 0; height: 3px; }}
+        .card-head {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-top: 1px; }}
+        .card-title {{ font-size: 12px; font-weight: 900; letter-spacing: .35px; color: #1f2937; text-transform: uppercase; }}
+        .card-icon {{ width: 32px; height: 32px; flex: 0 0 32px; opacity: .95; }}
+        .card-icon svg {{ width: 100%; height: 100%; }}
+        .card-value {{ font-size: 29px; line-height: 1.05; font-weight: 950; color: #111827; margin: 2px 0 6px 0; letter-spacing: -.3px; }}
+        .card-meta-row {{ display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }}
+        .pill {{ display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 8px; font-size: 10px; font-weight: 900; border: 1px solid transparent; white-space: nowrap; }}
+        .pill-gray {{ background: rgba(17,24,39,.06); color: #6b7280; border-color: rgba(17,24,39,.04); margin-bottom: 6px; }}
+        .meta-label {{ font-size: 10px; font-weight: 800; color: #7c8698; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 44%; }}
+        .card-note {{ font-size: 10px; color: #8a93a6; margin-top: -2px; margin-bottom: 4px; }}
+        .plot-wrap {{ width: 100%; height: 82px; }}
+        .plot-wrap .plotly-graph-div {{ width: 100% !important; height: 82px !important; }}
       </style>
       <script>{get_plotlyjs()}</script>
     </head>
     <body>
-      <div class="dashboard">
-        {''.join(cards)}
-      </div>
+      <div class="dashboard">{''.join(cards)}</div>
     </body>
     </html>
     """
-    return html
 
 
 # =========================================================
