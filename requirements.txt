@@ -1,5 +1,3 @@
-streamlit
-pandas
-plotly
-pyodbc
-openpyxl
+kivy
+requests
+python-dotenv
